@@ -1,12 +1,12 @@
-import { encodeTransfer } from './transfer-packet.js?v=2.0.7';
-import { mountChatPreviews, previewMarkup } from './chat-preview.js?v=2.0.7';
+import { encodeTransfer } from './transfer-packet.js?v=2.0.8';
+import { mountChatPreviews, previewMarkup } from './chat-preview.js?v=2.0.8';
 import { getContext } from '/scripts/extensions.js';
 import { getPastCharacterChats, getRequestHeaders, substituteParams, substituteParamsExtended } from '/script.js';
 import { getScriptsByType, SCRIPT_TYPES } from '/scripts/extensions/regex/engine.js';
 
 const READER_URL = 'https://st-nook.pages.dev/';
 const RECEIVE_URL = READER_URL + '#st-nook-receive=clipboard';
-const VERSION = '2.0.7';
+const VERSION = '2.0.8';
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 let activeDialog = null;
 
@@ -70,7 +70,7 @@ async function openImporter() {
   }
   return requests.get(key);
  }
- const disposePreviews = mountChatPreviews(dialog, { chats, loadRows, copyText, readLive: (chat, index) => {
+ const disposePreviews = mountChatPreviews(dialog, { chats, loadRows, copyText, isCharacterMessage: row => !row.is_user && row.role !== 'user' && row.role !== 'system' && (!row.is_system || row.name === character.name), readLive: (chat, index) => {
   if (!isCurrent(chat)) return null;
   const message = document.querySelector(`#chat .mes[mesid="${index}"]`);
   if (!message) return null;

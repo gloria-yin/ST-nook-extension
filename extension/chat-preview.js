@@ -1,4 +1,4 @@
-import { mobileTextSelection } from './mobile-selection.js?v=2.0.7';
+import { mobileTextSelection } from './mobile-selection.js?v=2.0.8';
 
 const PAGE_SIZE = 200;
 
@@ -26,7 +26,7 @@ export function visibleText(root, { onUnavailable = () => {} } = {}) {
  return read(root).replace(/\u00a0/g, ' ').replace(/[ \t]+\n/g, '\n').replace(/\n[ \t]+/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-export function mountChatPreviews(dialog, { chats, loadRows, readLive, copyText }) {
+export function mountChatPreviews(dialog, { chats, loadRows, readLive, copyText, isCharacterMessage }) {
  let disposed = false, renderer;
  const states = new Map();
  for (const details of dialog.querySelectorAll('[data-nook-preview]')) {
@@ -59,16 +59,23 @@ export function mountChatPreviews(dialog, { chats, loadRows, readLive, copyText 
   try {
    const rows = await loadRows(chats[state.file], { refresh });
    if (!active(state, ticket)) return;
-   state.messages = rows.filter(row => typeof row?.mes === 'string' || typeof row?.content === 'string');
-   if (!state.messages.length) throw Error('此文件没有文本楼层。');
+   const messages = rows.filter(row => typeof row?.mes === 'string' || typeof row?.content === 'string');
+   state.sourceIndices = messages.flatMap((row, index) => isCharacterMessage(row) ? [index] : []);
+   state.messages = state.sourceIndices.map(index => messages[index]);
+   if (!state.messages.length) throw Error('此文件没有角色楼层。');
    let usable = 0;
-   state.depths = new Array(state.messages.length);
-   for (let i = state.messages.length - 1; i >= 0; i--) { if (!state.messages[i].is_system) state.depths[i] = usable++; }
+   const depths = new Array(messages.length);
+   for (let i = messages.length - 1; i >= 0; i--) { if (!messages[i].is_system) depths[i] = usable++; }
+   state.depths = state.sourceIndices.map(index => depths[index]);
    state.index = Math.min(state.index, state.messages.length - 1);
    state.panel.querySelector('.st-nook-preview-tools').hidden = false;
    controls(state); await show(state);
   } catch (error) {
-   if (active(state, ticket)) { state.messages = null; status(state, error.message || '读取失败，请点击刷新重试。'); }
+   if (active(state, ticket)) {
+    state.messages = null;state.text = '';state.panel.querySelector('.st-nook-preview-tools').hidden = true;
+    if (state.selection) state.selection.setText(''); else state.panel.querySelector('[data-preview-content]').textContent = '';
+    status(state, error.message || '读取失败，请点击刷新重试。');
+   }
   } finally { if (active(state, ticket)) state.panel.removeAttribute('aria-busy'); }
  }
  async function show(state) {
@@ -77,14 +84,14 @@ export function mountChatPreviews(dialog, { chats, loadRows, readLive, copyText 
   state.panel.querySelector('[data-preview-copy]').disabled = true;
   state.text = ''; content.textContent = ''; status(state, '正在显示…'); controls(state);
   try {
-   const live = readLive(chats[state.file], state.index);
+   const sourceIndex = state.sourceIndices[state.index], live = readLive(chats[state.file], sourceIndex);
    let text, source, incomplete = false;
    if (live) { text = visibleText(live, { onUnavailable: () => { incomplete = true; } }); source = '当前界面'; }
    else {
-    renderer ||= import('./preview-renderer.js?v=2.0.7').catch(error => { renderer = null; throw error; });
+    renderer ||= import('./preview-renderer.js?v=2.0.8').catch(error => { renderer = null; throw error; });
     const { renderDisplayText } = await renderer;
     if (!active(state, ticket)) return;
-    text = renderDisplayText(state.messages[state.index], { index: state.index, depth: state.depths[state.index], visibleText });
+    text = renderDisplayText(state.messages[state.index], { index: sourceIndex, depth: state.depths[state.index], visibleText });
     source = '当前显示规则';
    }
    if (!active(state, ticket)) return;
