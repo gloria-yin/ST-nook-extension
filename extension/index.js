@@ -1,11 +1,12 @@
-import { encodeTransfer } from './transfer-packet.js?v=2.0.5';
+import { encodeTransfer } from './transfer-packet.js?v=2.0.7';
+import { mountChatPreviews, previewMarkup } from './chat-preview.js?v=2.0.7';
 import { getContext } from '/scripts/extensions.js';
 import { getPastCharacterChats, getRequestHeaders, substituteParams, substituteParamsExtended } from '/script.js';
 import { getScriptsByType, SCRIPT_TYPES } from '/scripts/extensions/regex/engine.js';
 
 const READER_URL = 'https://st-nook.pages.dev/';
 const RECEIVE_URL = READER_URL + '#st-nook-receive=clipboard';
-const VERSION = '2.0.5';
+const VERSION = '2.0.7';
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 let activeDialog = null;
 
@@ -33,7 +34,7 @@ async function openImporter() {
  <div class="st-nook-body">
  <label class="st-nook-field">书籍名称<input id="st-nook-title" class="text_pole" maxlength="80" value="${escape(character.name)}" required></label>
  <p class="st-nook-hint">准备资料后可复制内容或下载备份，在原 HTML 或在线阅读器中接收。</p>
- <fieldset><legend>聊天内容</legend><label class="st-nook-check"><input type="checkbox" id="st-nook-all-chats">选择全部聊天</label><div class="st-nook-chat-list">${chats.map((chat, index) => `<label class="st-nook-chat"><input type="checkbox" data-nook-chat="${index}" ${chat.file_name.replace(/\.jsonl$/, '') === current ? 'checked' : ''}><span>${escape(chat.file_name.replace(/\.jsonl$/, ''))}${chat.file_name.replace(/\.jsonl$/, '') === current ? '<small>当前聊天</small>' : ''}<small>${chat.chat_items ?? '—'} 层${chat.last_mes ? ` · ${escape(chat.last_mes)}` : ''}</small></span></label>`).join('') || '<p>此角色还没有聊天记录。</p>'}</div></fieldset>
+ <fieldset><legend>聊天内容</legend><label class="st-nook-check"><input type="checkbox" id="st-nook-all-chats">选择全部聊天</label><div class="st-nook-chat-list">${chats.map((chat, index) => `<div class="st-nook-chat-item"><label class="st-nook-chat"><input type="checkbox" data-nook-chat="${index}" ${chat.file_name.replace(/\.jsonl$/, '') === current ? 'checked' : ''}><span>${escape(chat.file_name.replace(/\.jsonl$/, ''))}${chat.file_name.replace(/\.jsonl$/, '') === current ? '<small>当前聊天</small>' : ''}<small>${chat.chat_items ?? '—'} 层${chat.last_mes ? ` · ${escape(chat.last_mes)}` : ''}</small></span></label><details class="st-nook-chat-preview" data-nook-preview="${index}"><summary>查看楼层</summary>${previewMarkup()}</details></div>`).join('') || '<p>此角色还没有聊天记录。</p>'}</div></fieldset>
  <fieldset><legend>导入已开启的正则</legend>${rules.map(group => `<details class="st-nook-rule-group"><summary><label class="st-nook-check"><input type="checkbox" data-nook-group="${group.id}" ${group.rules.length ? 'checked' : 'disabled'}>${group.name}<small>${group.rules.length} 条</small></label></summary><div>${group.rules.map((rule, index) => `<label class="st-nook-check"><input type="checkbox" data-nook-rule="${group.id}:${index}" checked><span>${escape(rule.scriptName || '未命名规则')}${rule.promptOnly ? ' · 仅提示词' : ''}</span></label>`).join('') || '<p class="st-nook-hint">没有已开启的规则</p>'}</div></details>`).join('')}</fieldset>
  <label class="st-nook-check"><input type="checkbox" id="st-nook-avatar" checked>使用当前角色头像作为封面</label>
  </div>
@@ -45,7 +46,38 @@ async function openImporter() {
  const $ = selector => dialog.querySelector(selector), $$ = selector => [...dialog.querySelectorAll(selector)];
  const report = text => { if (dialog.isConnected) $('#st-nook-status').textContent = text; };
  let packet = '', backup = null, preparedTitle = '';
- dialog.addEventListener('close', () => { activeDialog = null; packet = ''; backup = null; dialog.remove(); });
+ const requests = new Map(), controller = new AbortController();
+ const isCurrent = chat => {
+  const active = getContext();
+  return active.characterId === context.characterId && (active.chatId || active.characters?.[active.characterId]?.chat || '') === chat.file_name.replace(/\.jsonl$/, '');
+ };
+ async function loadRows(chat, { refresh = false, snapshot = false } = {}) {
+  if (isCurrent(chat)) {
+   const active = getContext();
+   return [{ character_name: character.name }, ...(snapshot ? structuredClone(active.chat) : active.chat)];
+  }
+  const key = chat.file_name;
+  if (refresh) requests.delete(key);
+  if (!requests.has(key)) {
+   const pending = (async () => {
+    const response = await fetch('/api/chats/get', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ ch_name: character.name, avatar_url: character.avatar, file_name: key.replace(/\.jsonl$/, '') }), signal: controller.signal });
+    if (!response.ok) throw Error(`读取 ${key} 失败：${response.status}`);
+    const rows = await response.json();
+    if (!Array.isArray(rows)) throw Error(`${key} 的聊天格式不正确`);
+    return rows;
+   })();
+   requests.set(key, pending);pending.catch(() => { if (requests.get(key) === pending) requests.delete(key); });
+  }
+  return requests.get(key);
+ }
+ const disposePreviews = mountChatPreviews(dialog, { chats, loadRows, copyText, readLive: (chat, index) => {
+  if (!isCurrent(chat)) return null;
+  const message = document.querySelector(`#chat .mes[mesid="${index}"]`);
+  if (!message) return null;
+  const candidates = [...message.querySelectorAll('.TH-streaming,.mes_text')];
+  return candidates.find(node => node.checkVisibility ? node.checkVisibility() : getComputedStyle(node).display !== 'none') || candidates[0] || null;
+ } });
+ dialog.addEventListener('close', () => { controller.abort();disposePreviews();requests.clear();activeDialog = null;packet = '';backup = null;dialog.remove(); });
  $('#st-nook-all-chats').onchange = event => $$('[data-nook-chat]').forEach(input => input.checked = event.target.checked);
  $$('[data-nook-chat]').forEach(input => input.onchange = () => { $('#st-nook-all-chats').checked = $$('[data-nook-chat]').every(element => element.checked); });
  $$('[data-nook-group]').forEach(input => input.onchange = () => $$(`[data-nook-rule^="${input.dataset.nookGroup}:"]`).forEach(element => element.checked = input.checked));
@@ -74,13 +106,7 @@ async function openImporter() {
    for (const [index, chat] of selected.entries()) {
     if (!dialog.isConnected) return;
     report(`整理聊天 ${index + 1} / ${selected.length}：${chat.file_name}`);
-    let rows;
-    if (chat.file_name.replace(/\.jsonl$/, '') === current) rows = [{ character_name: character.name }, ...structuredClone(context.chat)];
-    else {
-     const response = await fetch('/api/chats/get', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ ch_name: character.name, avatar_url: character.avatar, file_name: chat.file_name.replace(/\.jsonl$/, '') }) });
-     if (!response.ok) throw Error(`读取 ${chat.file_name} 失败：${response.status}`);
-     rows = await response.json();
-    }
+    const rows = await loadRows(chat, { snapshot: true });
     if (!Array.isArray(rows) || !rows.some(row => typeof row?.mes === 'string' || typeof row?.content === 'string')) throw Error(`${chat.file_name} 没有可导入的正文`);
     files.push({ name: chat.file_name, rows });
    }
@@ -127,7 +153,7 @@ async function openImporter() {
 
 async function copyText(text) {
  try { if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return true; } } catch {}
- const input = document.createElement('textarea'); input.value = text; input.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0';
+ const input = document.createElement('textarea'); input.readOnly = true; input.inputMode = 'none'; input.value = text; input.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0';
  document.querySelector('.st-nook-dialog').append(input); input.focus(); input.select();
  let copied = false; try { copied = document.execCommand('copy'); } catch {} input.remove(); return copied;
 }

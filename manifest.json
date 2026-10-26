@@ -3,9 +3,9 @@
   "loading_order": 100,
   "requires": [],
   "optional": [],
-  "js": "extension/index.js?v=2.0.5",
-  "css": "extension/style.css?v=2.0.5",
+  "js": "extension/index.js?v=2.0.7",
+  "css": "extension/style.css?v=2.0.7",
   "author": "Gloria",
-  "version": "2.0.5",
+  "version": "2.0.7",
   "homePage": "https://github.com/gloria-yin/ST-nook-extension"
 }
