@@ -1,0 +1,11 @@
+{
+  "display_name": "酒馆书屋 / ST Nook",
+  "loading_order": 100,
+  "requires": [],
+  "optional": [],
+  "js": "extension/index.js",
+  "css": "extension/style.css",
+  "author": "Gloria",
+  "version": "2.0.2",
+  "homePage": "https://github.com/gloria-yin/ST-nook-extension"
+}
