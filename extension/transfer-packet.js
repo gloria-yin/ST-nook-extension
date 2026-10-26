@@ -10,9 +10,12 @@ function validate(data) {
 
 export async function encodeTransfer(data) {
  validate(data);
- const json = JSON.stringify(data);
- if (typeof CompressionStream === 'undefined') return PREFIX + 'JSON:' + json;
- const compressed = new Uint8Array(await new Response(new Blob([json]).stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+ return encodeTransferBlob(new Blob([JSON.stringify(data)]));
+}
+
+export async function encodeTransferBlob(blob) {
+ if (typeof CompressionStream === 'undefined') return PREFIX + 'JSON:' + await blob.text();
+ const compressed = new Uint8Array(await new Response(blob.stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
  const chunks = [];
  for (let start = 0; start < compressed.length; start += 32768) chunks.push(String.fromCharCode(...compressed.subarray(start, start + 32768)));
  return PREFIX + 'GZIP:' + btoa(chunks.join(''));

@@ -1,4 +1,4 @@
-import { mobileTextSelection } from './mobile-selection.js?v=2.0.8';
+import { mobileTextSelection } from './mobile-selection.js?v=2.0.9';
 
 const PAGE_SIZE = 200;
 
@@ -29,21 +29,34 @@ export function visibleText(root, { onUnavailable = () => {} } = {}) {
 export function mountChatPreviews(dialog, { chats, loadRows, readLive, copyText, isCharacterMessage }) {
  let disposed = false, renderer;
  const states = new Map();
- for (const details of dialog.querySelectorAll('[data-nook-preview]')) {
-  const file = Number(details.dataset.nookPreview), panel = details.querySelector('.st-nook-preview-panel');
-  const state = { file, details, panel, messages: null, index: 0, ticket: 0, text: '', selection: mobileTextSelection(panel) };
-  states.set(file, state);
-  details.addEventListener('toggle', () => { if (!details.open) state.selection?.reset(); else if (!state.messages) load(state); });
- }
- function active(state, ticket) { return !disposed && dialog.isConnected && state.ticket === ticket; }
+ dialog.addEventListener('toggle', event => {
+  const details = event.target;
+  if (!details.matches('[data-nook-preview]')) return;
+  const file = Number(details.dataset.nookPreview);
+  let state = states.get(file);
+  if (!details.open) { if (state) { state.ticket++;state.selection?.reset(); } return; }
+  if (!state) {
+   details.insertAdjacentHTML('beforeend', previewMarkup());
+   const panel = details.querySelector('.st-nook-preview-panel');
+   state = { file, details, panel, messages: null, index: 0, ticket: 0, text: '', rendered: new Map(), optionGroup: -1, optionTotal: -1, selection: mobileTextSelection(panel) };
+   states.set(file, state);
+  }
+  if (!state.messages) load(state);else show(state);
+ }, true);
+ function active(state, ticket) { return !disposed && dialog.isConnected && state.details.open && state.ticket === ticket; }
  function status(state, text) { state.panel.querySelector('[data-preview-status]').textContent = text; }
  function controls(state) {
   const total = state.messages.length, group = Math.floor(state.index / PAGE_SIZE), start = group * PAGE_SIZE;
   const range = state.panel.querySelector('[data-preview-range]');
   range.parentElement.hidden = total <= PAGE_SIZE;
-  range.replaceChildren(...Array.from({ length: Math.ceil(total / PAGE_SIZE) }, (_, i) => new Option(`${i * PAGE_SIZE + 1}–${Math.min(total, (i + 1) * PAGE_SIZE)} 层`, String(i), false, i === group)));
+  if (state.optionTotal !== total) range.replaceChildren(...Array.from({ length: Math.ceil(total / PAGE_SIZE) }, (_, i) => new Option(`${i * PAGE_SIZE + 1}–${Math.min(total, (i + 1) * PAGE_SIZE)} 层`, String(i))));
+  range.value = String(group);
   const floors = state.panel.querySelector('[data-preview-floor]');
-  floors.replaceChildren(...state.messages.slice(start, start + PAGE_SIZE).map((row, offset) => new Option(`第 ${start + offset + 1} 层 · ${String(row.name || (row.is_user ? '我' : '角色')).slice(0, 30)}`, String(start + offset), false, start + offset === state.index)));
+  if (state.optionGroup !== group || state.optionTotal !== total) {
+   floors.replaceChildren(...state.messages.slice(start, start + PAGE_SIZE).map((row, offset) => new Option(`第 ${start + offset + 1} 层 · ${String(row.name || (row.is_user ? '我' : '角色')).slice(0, 30)}`, String(start + offset))));
+   state.optionGroup = group;state.optionTotal = total;
+  }
+  floors.value = String(state.index);
   const jump = state.panel.querySelector('[data-preview-jump]');
   jump.max = String(total); jump.value = String(state.index + 1);
   state.panel.querySelector('[data-preview-total]').textContent = `共 ${total} 层`;
@@ -52,6 +65,7 @@ export function mountChatPreviews(dialog, { chats, loadRows, readLive, copyText,
  }
  async function load(state, refresh = false) {
   const ticket = ++state.ticket;
+  state.rendered.clear();state.optionGroup = -1;state.optionTotal = -1;
   state.panel.setAttribute('aria-busy', 'true');
   state.panel.querySelector('[data-preview-copy]').disabled = true;
   state.selection?.reset();
@@ -69,7 +83,7 @@ export function mountChatPreviews(dialog, { chats, loadRows, readLive, copyText,
    state.depths = state.sourceIndices.map(index => depths[index]);
    state.index = Math.min(state.index, state.messages.length - 1);
    state.panel.querySelector('.st-nook-preview-tools').hidden = false;
-   controls(state); await show(state);
+   await show(state);
   } catch (error) {
    if (active(state, ticket)) {
     state.messages = null;state.text = '';state.panel.querySelector('.st-nook-preview-tools').hidden = true;
@@ -82,16 +96,23 @@ export function mountChatPreviews(dialog, { chats, loadRows, readLive, copyText,
   const ticket = ++state.ticket, content = state.panel.querySelector('[data-preview-content]');
   state.panel.setAttribute('aria-busy', 'true');
   state.panel.querySelector('[data-preview-copy]').disabled = true;
-  state.text = ''; content.textContent = ''; status(state, '正在显示…'); controls(state);
+  state.text = '';status(state, '正在显示…'); controls(state);
   try {
    const sourceIndex = state.sourceIndices[state.index], live = readLive(chats[state.file], sourceIndex);
    let text, source, incomplete = false;
    if (live) { text = visibleText(live, { onUnavailable: () => { incomplete = true; } }); source = '当前界面'; }
    else {
-    renderer ||= import('./preview-renderer.js?v=2.0.8').catch(error => { renderer = null; throw error; });
-    const { renderDisplayText } = await renderer;
-    if (!active(state, ticket)) return;
-    text = renderDisplayText(state.messages[state.index], { index: sourceIndex, depth: state.depths[state.index], visibleText });
+    const row = state.messages[state.index], cached = state.rendered.get(state.index);
+    if (cached && cached.original === (row.mes ?? row.content) && cached.display === row.extra?.display_text) text = cached.text;
+    else {
+     renderer ||= import('./preview-renderer.js?v=2.0.9').catch(error => { renderer = null; throw error; });
+     const { renderDisplayText } = await renderer;
+     await new Promise(resolve => setTimeout(resolve, 0));
+     if (!active(state, ticket)) return;
+     text = renderDisplayText(row, { index: sourceIndex, depth: state.depths[state.index], visibleText });
+     state.rendered.set(state.index, { text, original: row.mes ?? row.content, display: row.extra?.display_text });
+     if (state.rendered.size > 12) state.rendered.delete(state.rendered.keys().next().value);
+    }
     source = '当前显示规则';
    }
    if (!active(state, ticket)) return;
@@ -106,7 +127,7 @@ export function mountChatPreviews(dialog, { chats, loadRows, readLive, copyText,
  }
  dialog.addEventListener('change', event => {
   const details = event.target.closest('[data-nook-preview]'); if (!details) return;
-  const state = states.get(Number(details.dataset.nookPreview)); if (!state.messages) return;
+  const state = states.get(Number(details.dataset.nookPreview)); if (!state?.messages) return;
   if (event.target.matches('[data-preview-range]')) state.index = Number(event.target.value) * PAGE_SIZE;
   else if (event.target.matches('[data-preview-floor]')) state.index = Number(event.target.value);
   else if (event.target.matches('[data-preview-jump]')) state.index = Math.max(0, Math.min(state.messages.length - 1, Math.trunc(Number(event.target.value) || 1) - 1));
@@ -120,6 +141,7 @@ export function mountChatPreviews(dialog, { chats, loadRows, readLive, copyText,
   const button = event.target.closest('[data-preview-prev],[data-preview-next],[data-preview-last],[data-preview-refresh],[data-preview-copy]');
   if (!button || button.disabled) return;
   const state = states.get(Number(button.closest('[data-nook-preview]').dataset.nookPreview));
+  if (!state) return;
   if (button.hasAttribute('data-preview-refresh')) { load(state, true); return; }
   if (!state.messages) return;
   if (button.hasAttribute('data-preview-copy')) {

@@ -11,7 +11,10 @@ export function mobileTextSelection(panel) {
  const dialog = panel.closest('.st-nook-dialog'), button = panel.querySelector('[data-preview-copy]'), controller = new AbortController();
  const listen = (target, event, callback, options = {}) => target.addEventListener(event, callback, { ...options, signal: controller.signal });
  const selected = () => text.value.slice(text.selectionStart, text.selectionEnd);
- const update = () => { button.textContent = selected() ? '复制选中' : '复制本层'; };
+ const update = () => {
+  const label = text.selectionStart !== text.selectionEnd ? '复制选中' : '复制本层';
+  if (button.textContent !== label) button.textContent = label;
+ };
  const unlock = () => { if (dialog.dataset.selectionOwner === panel.parentElement.dataset.nookPreview) { dialog.classList.remove('st-nook-text-selecting'); delete dialog.dataset.selectionOwner; } };
  listen(text, 'focus', () => { dialog.dataset.selectionOwner = panel.parentElement.dataset.nookPreview; dialog.classList.add('st-nook-text-selecting'); });
  listen(text, 'blur', unlock);
