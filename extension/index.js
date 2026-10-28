@@ -1,23 +1,24 @@
 import { mountChatPreviews } from './chat-preview.js?v=2.0.9';
-import { clipboardResult, clipboardTooLarge, copyText, reserveClipboardWrite } from './clipboard.js?v=2.0.10';
+import { clipboardResult, clipboardTooLarge, copyText, reserveClipboardWrite } from './clipboard.js?v=2.0.11';
+import { chatMetadataText, isCharacterReply, summarizeChat } from './chat-metadata.js?v=2.0.11';
 import { getContext } from '/scripts/extensions.js';
 import { getPastCharacterChats, getRequestHeaders, substituteParams, substituteParamsExtended } from '/script.js';
 import { getScriptsByType, SCRIPT_TYPES } from '/scripts/extensions/regex/engine.js';
 
 const READER_URL = 'https://st-nook.pages.dev/';
 const RECEIVE_URL = READER_URL + '#st-nook-receive=clipboard';
-const VERSION = '2.0.10';
+const VERSION = '2.0.11';
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 let activeDialog = null;
 const chatLists = new Map();
+const chatSummaries = new Map();
 const yieldUI = () => new Promise(resolve => setTimeout(resolve, 0));
 
 async function listChats(character, characterId, signal) {
  const cached = chatLists.get(character.avatar);
  if (cached && Date.now() - cached.time < 30000) return cached.chats;
  let chats;
- // This endpoint can list filenames without opening and scanning every chat file.
- const response = await fetch('/api/characters/chats', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ avatar_url: character.avatar, simple: true }), signal });
+ const response = await fetch('/api/characters/chats', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ avatar_url: character.avatar }), signal });
  if (response.ok) {
   const data = await response.json();
   if (!data?.error) chats = Object.values(data).filter(chat => typeof chat?.file_name === 'string');
@@ -31,7 +32,7 @@ async function listChats(character, characterId, signal) {
 
 function chatMarkup(chat, index, current, checked = false) {
  const name = chat.file_name.replace(/\.jsonl$/, '');
- return `<div class="st-nook-chat-item"><label class="st-nook-chat"><input type="checkbox" data-nook-chat="${index}" ${checked ? 'checked' : ''}><span>${escape(name)}${name === current ? '<small>当前聊天</small>' : ''}<small>${chat.chat_items != null ? `${chat.chat_items} 条消息` : '展开查看角色楼层'}</small></span></label><details class="st-nook-chat-preview" data-nook-preview="${index}"><summary>查看楼层</summary></details></div>`;
+ return `<div class="st-nook-chat-item" data-nook-file="${index}"><label class="st-nook-chat"><input type="checkbox" data-nook-chat="${index}" ${checked ? 'checked' : ''}><span>${escape(name)}${name === current ? '<small>当前聊天</small>' : ''}<small data-nook-chat-meta="${index}">${escape(chatMetadataText(chat))}</small></span></label><details class="st-nook-chat-preview" data-nook-preview="${index}"><summary>查看楼层</summary></details></div>`;
 }
 
 function addButton() {
@@ -48,7 +49,7 @@ async function openImporter() {
  const context = getContext(), character = context.characters?.[context.characterId];
  if (!character || context.groupId) { toastr.info('请先打开一张角色卡的聊天。', '酒馆书屋'); return; }
  const current = character.chat || context.chatId || '';
- const chats = current ? [{ file_name: current + '.jsonl', chat_items: context.chat.length }] : [];
+ const chats = current ? [{ file_name: current + '.jsonl', ...summarizeChat(context.chat, character.name) }] : [];
  const groups = [['global', '全局正则', SCRIPT_TYPES.GLOBAL], ['preset', '预设正则', SCRIPT_TYPES.PRESET], ['local', '局部正则', SCRIPT_TYPES.SCOPED]];
  const rules = groups.map(([id, name, type]) => ({ id, name, rules: getScriptsByType(type, { allowedOnly: true }).filter(rule => !rule.disabled) }));
  const dialog = document.createElement('dialog'); dialog.className = 'st-nook-dialog'; activeDialog = dialog;
@@ -71,25 +72,78 @@ async function openImporter() {
   const active = getContext();
   return active.characterId === context.characterId && (active.chatId || active.characters?.[active.characterId]?.chat || '') === chat.file_name.replace(/\.jsonl$/, '');
  };
+ const savedRequest = chat => ({ headers: getRequestHeaders(), body: { ch_name: character.name, avatar_url: character.avatar, file_name: chat.file_name.replace(/\.jsonl$/, '') }, characterName: character.name });
+ function backgroundReader() {
+  loader ||= import('./transfer-builder.js?v=2.0.11').then(({ createTransferBuilder }) => createTransferBuilder(null, controller.signal)).catch(error => { loader = null;throw error; });
+  return loader;
+ }
+ function updateMetadata(chat, summary = {}) {
+  Object.assign(chat, summary);
+  if (isCurrent(chat)) {
+   const live = summarizeChat(getContext().chat, character.name);
+   chat.totalFloors = live.totalFloors;chat.characterFloors = live.characterFloors;
+  }
+  const label = $(`[data-nook-chat-meta="${chats.indexOf(chat)}"]`);
+  if (label) label.textContent = chatMetadataText(chat);
+ }
  async function loadRows(chat, { refresh = false } = {}) {
   if (refresh) clearPrepared();
   if (isCurrent(chat)) {
    const active = getContext();
+   updateMetadata(chat);
    return [{ character_name: character.name }, ...active.chat];
   }
   const key = chat.file_name;
   if (refresh) requests.delete(key);
   if (!requests.has(key)) {
    const pending = (async () => {
-    loader ||= import('./transfer-builder.js?v=2.0.9').then(({ createTransferBuilder }) => createTransferBuilder(null, controller.signal)).catch(error => { loader = null;throw error; });
-    const background = await loader;
-    return background.read({ headers: getRequestHeaders(), body: { ch_name: character.name, avatar_url: character.avatar, file_name: key.replace(/\.jsonl$/, '') } });
+    const background = await backgroundReader();
+    return background.read(savedRequest(chat));
    })();
    requests.set(key, pending);pending.catch(() => { if (requests.get(key) === pending) requests.delete(key); });
   }
-  return requests.get(key);
+  const rows = await requests.get(key);
+  updateMetadata(chat, { ...summarizeChat(rows, character.name), metadataLoaded: true });
+  return rows;
  }
- const disposePreviews = mountChatPreviews(dialog, { chats, loadRows, copyText, isCharacterMessage: row => !row.is_user && row.role !== 'user' && row.role !== 'system' && (!row.is_system || row.name === character.name), readLive: (chat, index) => {
+ const metadataQueue = [], queued = new Set();let scanning = false;
+ async function scanMetadata() {
+  if (scanning) return;
+  scanning = true;
+  try {
+   while (metadataQueue.length && !controller.signal.aborted) {
+    if (busy) { await new Promise(resolve => setTimeout(resolve, 30));continue; }
+    const chat = chats[metadataQueue.shift()];
+    const key = JSON.stringify([character.avatar, chat.file_name, chat.file_size, chat.chat_items, chat.last_mes]);
+    try {
+     const cached = chatSummaries.get(key);
+     let summary = cached && Date.now() - cached.time < 30000 ? cached.summary : null;
+     if (!summary) {
+      const pending = requests.get(chat.file_name);
+      summary = pending ? summarizeChat(await pending, character.name) : await (await backgroundReader()).inspect(savedRequest(chat));
+      chatSummaries.set(key, { summary, time: Date.now() });
+      if (chatSummaries.size > 200) chatSummaries.delete(chatSummaries.keys().next().value);
+     }
+     if (!controller.signal.aborted) updateMetadata(chat, { ...summary, metadataLoaded: true });
+    } catch { if (!controller.signal.aborted) updateMetadata(chat, { metadataLoaded: true }); }
+    await yieldUI();
+   }
+  } finally { scanning = false; }
+ }
+ function queueMetadata(index) {
+  if (queued.has(index)) return;
+  queued.add(index);metadataQueue.push(index);scanMetadata();
+ }
+ const metadataObserver = typeof IntersectionObserver === 'undefined' ? null : new IntersectionObserver(entries => {
+  for (const entry of entries) if (entry.isIntersecting) { metadataObserver.unobserve(entry.target);queueMetadata(Number(entry.target.dataset.nookFile)); }
+ }, { root: $('.st-nook-chat-list'), rootMargin: '80px' });
+ function observeMetadata() {
+  for (const row of $$('[data-nook-file]')) {
+   if (queued.has(Number(row.dataset.nookFile))) continue;
+   if (metadataObserver) metadataObserver.observe(row);else queueMetadata(Number(row.dataset.nookFile));
+  }
+ }
+ const disposePreviews = mountChatPreviews(dialog, { chats, loadRows, copyText, isCharacterMessage: row => isCharacterReply(row, character.name), readLive: (chat, index) => {
   if (!isCurrent(chat)) return null;
   const message = document.querySelector(`#chat .mes[mesid="${index}"]`);
   if (!message) return null;
@@ -97,7 +151,7 @@ async function openImporter() {
   return candidates.find(node => node.checkVisibility ? node.checkVisibility() : getComputedStyle(node).display !== 'none') || candidates[0] || null;
  } });
  function clearPrepared() { prepared?.builder.close(); prepared = null;$('#st-nook-copy-text').value = '';$('#st-nook-manual-copy').hidden = true;$('#st-nook-copy').textContent = '复制资料'; }
- dialog.addEventListener('close', () => { controller.abort();disposePreviews();requests.clear();clearPrepared();activeDialog = null;dialog.remove(); });
+ dialog.addEventListener('close', () => { controller.abort();metadataObserver?.disconnect();metadataQueue.length = 0;disposePreviews();requests.clear();clearPrepared();activeDialog = null;dialog.remove(); });
  dialog.addEventListener('change', event => {
   const input = event.target;
   if (input.matches('#st-nook-all-chats')) $$('[data-nook-chat]').forEach(element => element.checked = input.checked);
@@ -118,19 +172,23 @@ async function openImporter() {
   try {
    const listed = await listChats(character, context.characterId, controller.signal);
    if (!dialog.isConnected) return;
-   const existing = new Set(chats.map(chat => chat.file_name)), additions = listed.filter(chat => !existing.has(chat.file_name));
+   const existing = new Map(chats.map(chat => [chat.file_name, chat]));
+   for (const chat of listed) if (existing.has(chat.file_name)) updateMetadata(existing.get(chat.file_name), { ...chat, file_size: chat.file_size || '未提供' });
+   for (const chat of chats) if (!listed.some(item => item.file_name === chat.file_name)) updateMetadata(chat, { file_size: '未保存' });
+   const additions = listed.filter(chat => !existing.has(chat.file_name)).map(chat => ({ ...chat, file_size: chat.file_size || '未提供' }));
    for (let start = 0; start < additions.length; start += 40) {
     while (busy && dialog.isConnected) await new Promise(resolve => setTimeout(resolve, 30));
     if (!dialog.isConnected) return;
     const offset = chats.length, batch = additions.slice(start, start + 40);chats.push(...batch);
     $('.st-nook-chat-list').insertAdjacentHTML('beforeend', batch.map((chat, index) => chatMarkup(chat, offset + index, current)).join(''));
+    observeMetadata();
     await yieldUI();
    }
    $('#st-nook-all-chats').disabled = !chats.length;
    status.textContent = chats.length ? '' : '此角色还没有聊天记录。';
   } catch (error) {
    if (!controller.signal.aborted) status.innerHTML = '聊天目录读取失败。<button type="button" class="menu_button" data-nook-list-retry>重试</button>';
-  }
+  } finally { if (!controller.signal.aborted) observeMetadata(); }
  }
  dialog.addEventListener('click', event => { if (event.target.closest('[data-nook-list-retry]')) populateChats(); });
  populateChats();
@@ -155,7 +213,7 @@ async function openImporter() {
     rule.substituteRegex = 0; chosen.push(rule);
    }
    const [cover, firstRows] = await Promise.all([$('#st-nook-avatar').checked ? avatarData(character.avatar, controller.signal) : '', loadRows(selected[0])]);
-   const { createTransferBuilder } = await import('./transfer-builder.js?v=2.0.9');
+   const { createTransferBuilder } = await import('./transfer-builder.js?v=2.0.11');
    builder = await createTransferBuilder({ title, name: character.name, cover, rules: chosen }, controller.signal);
    let rows = firstRows;
    for (const [index, chat] of selected.entries()) {
@@ -196,11 +254,14 @@ async function openImporter() {
    }
    if (!data.packet) { report('正在压缩复制资料…');data.packet = await data.builder.encode(); }
    if (!dialog.isConnected) return;
-   deliver(data.packet);
-   if (clipboardTooLarge(data.packet)) {
+   if (clipboardTooLarge(data.packet) && !cached) {
+    rejectDelivery(Error('等待再次点击复制大资料'));
     online?.close();online = null;
-    report('资料较大，超过手机剪贴板的可靠容量。请点击“下载备份”，在阅读器中选择导入文件，内容不会截断。');return;
+    $('#st-nook-manual-copy').hidden = false;$('#st-nook-copy-text').value = data.packet;
+    $('#st-nook-copy').textContent = '仍然复制大资料';
+    report(`无损压缩后约 ${(data.packet.length / 10000).toFixed(1)} 万字符，超过手机建议值。可点击“仍然复制大资料”尝试完整复制；若接收失败，请下载备份导入。`);return;
    }
+   deliver(data.packet);
    const copied = initialCopy ? await clipboardResult(initialCopy) : await copyText(data.packet);
    if (!copied) {
     online?.close();online = null;
@@ -210,7 +271,7 @@ async function openImporter() {
     report('资料已准备，但未完成复制。请再次点击“复制”，或长按资料框全选后复制；也可下载备份。');return;
    }
    $('#st-nook-manual-copy').hidden = true;$('#st-nook-copy-text').value = '';$('#st-nook-copy').textContent = '复制资料';
-   report('资料已复制，回阅读器点击“新建书籍”→“接收书籍”，也可按 Ctrl+V。');
+   report(clipboardTooLarge(data.packet) ? '大资料已提交剪贴板，回阅读器点击“接收书籍”。若系统截断或无法粘贴，请下载备份导入。' : '资料已复制，回阅读器点击“新建书籍”→“接收书籍”，也可按 Ctrl+V。');
    if (mode === 'online') {
     if (online) { online.location.replace(RECEIVE_URL);online = null; }
     else { const link = document.createElement('a');link.href = RECEIVE_URL;link.target = '_blank';link.rel = 'noopener noreferrer';link.textContent = ' 打开在线阅读器';$('#st-nook-status').append(link); }

@@ -10,7 +10,6 @@ export function reserveClipboardWrite(text) {
  if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') return null;
  try {
   const blob = text.then(value => {
-   if (clipboardTooLarge(value)) throw Error('资料超过手机剪贴板容量，请下载备份');
    return new Blob([value], { type: 'text/plain' });
   });
   blob.catch(() => {});
@@ -39,7 +38,6 @@ function legacyCopy(text) {
 }
 
 export function copyText(text) {
- if (clipboardTooLarge(text)) return Promise.resolve(false);
  // The prepared-data retry reaches this call synchronously from the user's tap.
  if (navigator.clipboard?.writeText) {
   try { return clipboardResult(settled(navigator.clipboard.writeText(text))).then(copied => copied || legacyCopy(text)); }

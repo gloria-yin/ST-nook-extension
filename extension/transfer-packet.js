@@ -14,8 +14,24 @@ export async function encodeTransfer(data) {
 }
 
 export async function encodeTransferBlob(blob) {
- if (typeof CompressionStream === 'undefined') return PREFIX + 'JSON:' + await blob.text();
- const compressed = new Uint8Array(await new Response(blob.stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer());
+ const native = typeof CompressionStream === 'undefined' ? Promise.resolve(null) : new Response(blob.stream().pipeThrough(new CompressionStream('gzip'))).arrayBuffer().then(value => new Uint8Array(value)).catch(() => null);
+ let compressed;
+ try {
+  const { Deflate } = await import('./vendor/pako-deflate.js?v=1.0.11');
+  const encoder = new Deflate({ gzip: true, level: 9 });
+  // Keep the standard gzip payload so existing standalone readers can decode it.
+  for (let start = 0; start < blob.size; start += 262144) {
+   encoder.push(new Uint8Array(await blob.slice(start, start + 262144).arrayBuffer()), false);
+   if (encoder.err) throw Error(encoder.msg);
+   await new Promise(resolve => setTimeout(resolve, 0));
+  }
+  encoder.push(new Uint8Array(0), true);
+  if (encoder.err) throw Error(encoder.msg);
+  compressed = encoder.result;
+ } catch { /* Use the browser encoder if the optional compressor is unavailable. */ }
+ const standard = await native;
+ if (standard && (!compressed || standard.length < compressed.length)) compressed = standard;
+ if (!compressed) return PREFIX + 'JSON:' + await blob.text();
  const chunks = [];
  for (let start = 0; start < compressed.length; start += 32768) chunks.push(String.fromCharCode(...compressed.subarray(start, start + 32768)));
  return PREFIX + 'GZIP:' + btoa(chunks.join(''));

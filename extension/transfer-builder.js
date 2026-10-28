@@ -1,4 +1,4 @@
-import { compactRow, transferOperation } from './transfer-document.js?v=2.0.9';
+import { compactRow, transferOperation } from './transfer-document.js?v=2.0.11';
 
 export const yieldUI = () => new Promise(resolve => setTimeout(resolve, 0));
 
@@ -27,7 +27,7 @@ export async function createTransferBuilder(book, signal) {
   });
  }
  try {
-  worker = new Worker(new URL('./transfer-worker.js?v=2.0.9', import.meta.url), { type: 'module' });
+  worker = new Worker(new URL('./transfer-worker.js?v=2.0.11', import.meta.url), { type: 'module' });
   worker.onmessage = ({ data }) => {
    const request = pending.get(data.id); if (!request) return;
    pending.delete(data.id); data.error ? request.reject(Error(data.error)) : request.resolve(data.value);
@@ -41,6 +41,7 @@ export async function createTransferBuilder(book, signal) {
  }
  return {
   read: request => send('read', request),
+  inspect: request => send('inspect', request),
   async file(name, rows) {
    await send('file', name);
    let batch = [], length = 0, started = performance.now();

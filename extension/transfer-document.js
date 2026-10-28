@@ -1,4 +1,5 @@
-import { encodeTransferBlob } from './transfer-packet.js?v=2.0.9';
+import { encodeTransferBlob } from './transfer-packet.js?v=2.0.11';
+import { summarizeChat } from './chat-metadata.js?v=2.0.11';
 
 const rowKeys = ['name', 'is_user', 'is_system', 'role', 'mes', 'content', 'send_date', 'timestamp', 'date', 'create_date', 'character_name', 'user_name'];
 export function compactRow(source, preview = false) {
@@ -34,12 +35,12 @@ export function createTransferDocument(book) {
 }
 
 export async function transferOperation(state, { type, value }) {
- if (type === 'read') {
+ if (type === 'read' || type === 'inspect') {
   const response = await fetch('/api/chats/get', { method: 'POST', headers: value.headers, body: JSON.stringify(value.body), signal: state.signal });
   if (!response.ok) throw Error(`读取 ${value.body.file_name} 失败：${response.status}`);
   const rows = await response.json();
   if (!Array.isArray(rows)) throw Error('聊天格式不正确');
-  return rows.map(row => compactRow(row, true));
+  return type === 'inspect' ? summarizeChat(rows, value.characterName) : rows.map(row => compactRow(row, true));
  }
  if (type === 'start') state.document = createTransferDocument(value);
  else if (type === 'file') state.document.file(value);

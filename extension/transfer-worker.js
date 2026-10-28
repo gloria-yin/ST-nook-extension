@@ -1,4 +1,4 @@
-import { transferOperation } from './transfer-document.js?v=2.0.9';
+import { transferOperation } from './transfer-document.js?v=2.0.11';
 
 const state = {};
 self.onmessage = async ({ data }) => {
