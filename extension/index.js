@@ -1,11 +1,12 @@
 import { mountChatPreviews } from './chat-preview.js?v=2.0.9';
+import { clipboardResult, clipboardTooLarge, copyText, reserveClipboardWrite } from './clipboard.js?v=2.0.10';
 import { getContext } from '/scripts/extensions.js';
 import { getPastCharacterChats, getRequestHeaders, substituteParams, substituteParamsExtended } from '/script.js';
 import { getScriptsByType, SCRIPT_TYPES } from '/scripts/extensions/regex/engine.js';
 
 const READER_URL = 'https://st-nook.pages.dev/';
 const RECEIVE_URL = READER_URL + '#st-nook-receive=clipboard';
-const VERSION = '2.0.9';
+const VERSION = '2.0.10';
 const escape = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
 let activeDialog = null;
 const chatLists = new Map();
@@ -58,7 +59,7 @@ async function openImporter() {
  <fieldset><legend>聊天内容</legend><label class="st-nook-check"><input type="checkbox" id="st-nook-all-chats" disabled>选择全部聊天</label><div class="st-nook-chat-list">${chats.map((chat, index) => chatMarkup(chat, index, current, true)).join('')}</div><small class="st-nook-hint" id="st-nook-list-status" role="status">正在读取其他聊天…</small></fieldset>
  <fieldset><legend>导入已开启的正则</legend>${rules.map(group => `<details class="st-nook-rule-group"><summary><label class="st-nook-check"><input type="checkbox" data-nook-group="${group.id}" ${group.rules.length ? 'checked' : 'disabled'}>${group.name}<small>${group.rules.length} 条</small></label></summary><div>${group.rules.map((rule, index) => `<label class="st-nook-check"><input type="checkbox" data-nook-rule="${group.id}:${index}" checked><span>${escape(rule.scriptName || '未命名规则')}${rule.promptOnly ? ' · 仅提示词' : ''}</span></label>`).join('') || '<p class="st-nook-hint">没有已开启的规则</p>'}</div></details>`).join('')}</fieldset>
  <label class="st-nook-check"><input type="checkbox" id="st-nook-avatar" checked>使用当前角色头像作为封面</label>
- <label class="st-nook-field" id="st-nook-manual-copy" hidden>可复制内容<textarea id="st-nook-copy-text" class="text_pole" rows="5" readonly spellcheck="false"></textarea></label>
+ <label class="st-nook-field" id="st-nook-manual-copy" hidden>可复制内容<textarea id="st-nook-copy-text" class="text_pole" rows="4" readonly inputmode="none" spellcheck="false"></textarea></label>
  </div>
  <p id="st-nook-status" role="status"></p><footer class="st-nook-export-actions"><button type="button" class="menu_button st-nook-submit" id="st-nook-copy">复制资料</button><button type="button" class="menu_button" id="st-nook-download">下载备份</button><button type="button" class="menu_button" id="st-nook-open-reader">在线导入</button></footer></form>`;
  document.body.append(dialog); dialog.showModal();
@@ -95,7 +96,7 @@ async function openImporter() {
   const candidates = [...message.querySelectorAll('.TH-streaming,.mes_text')];
   return candidates.find(node => node.checkVisibility ? node.checkVisibility() : getComputedStyle(node).display !== 'none') || candidates[0] || null;
  } });
- function clearPrepared() { prepared?.builder.close(); prepared = null;$('#st-nook-copy-text').value = '';$('#st-nook-manual-copy').hidden = true; }
+ function clearPrepared() { prepared?.builder.close(); prepared = null;$('#st-nook-copy-text').value = '';$('#st-nook-manual-copy').hidden = true;$('#st-nook-copy').textContent = '复制资料'; }
  dialog.addEventListener('close', () => { controller.abort();disposePreviews();requests.clear();clearPrepared();activeDialog = null;dialog.remove(); });
  dialog.addEventListener('change', event => {
   const input = event.target;
@@ -174,6 +175,10 @@ async function openImporter() {
   if (busy) return;
   if (!$('#st-nook-title').value.trim()) { $('#st-nook-title').focus();report('请输入书名。');return; }
   if (!$('[data-nook-chat]:checked')) { report('请至少选择一份聊天。');return; }
+  const source = getContext().chat, cached = prepared && prepared.source === source && prepared.length === source.length && prepared.lastText === (source.at(-1)?.mes ?? source.at(-1)?.content) ? prepared.packet : '';
+  let deliver, rejectDelivery;
+  const delivery = new Promise((resolve, reject) => { deliver = resolve;rejectDelivery = reject; });delivery.catch(() => {});
+  const initialCopy = mode === 'download' ? null : cached ? copyText(cached) : reserveClipboardWrite(delivery);
   busy = true;
   const buttons = $$('.st-nook-export-actions button');buttons.forEach(button => button.disabled = true);
   const inputs = $$('fieldset,#st-nook-title,#st-nook-avatar'), disabled = inputs.map(input => input.disabled);inputs.forEach(input => input.disabled = true);
@@ -191,19 +196,28 @@ async function openImporter() {
    }
    if (!data.packet) { report('正在压缩复制资料…');data.packet = await data.builder.encode(); }
    if (!dialog.isConnected) return;
-   const copied = await copyText(data.packet);
+   deliver(data.packet);
+   if (clipboardTooLarge(data.packet)) {
+    online?.close();online = null;
+    report('资料较大，超过手机剪贴板的可靠容量。请点击“下载备份”，在阅读器中选择导入文件，内容不会截断。');return;
+   }
+   const copied = initialCopy ? await clipboardResult(initialCopy) : await copyText(data.packet);
    if (!copied) {
     online?.close();online = null;
-    $('#st-nook-manual-copy').hidden = false;$('#st-nook-copy-text').value = data.packet;$('#st-nook-copy-text').select();
-    report('请按 Ctrl+C 或长按复制，再回阅读器点击“新建书籍”→“接收书籍”；也可下载备份。');return;
+    $('#st-nook-manual-copy').hidden = false;$('#st-nook-copy-text').value = data.packet;
+    $('#st-nook-copy').textContent = '再次点击复制';
+    $('#st-nook-manual-copy').scrollIntoView({ block: 'nearest' });
+    report('资料已准备，但未完成复制。请再次点击“复制”，或长按资料框全选后复制；也可下载备份。');return;
    }
+   $('#st-nook-manual-copy').hidden = true;$('#st-nook-copy-text').value = '';$('#st-nook-copy').textContent = '复制资料';
    report('资料已复制，回阅读器点击“新建书籍”→“接收书籍”，也可按 Ctrl+V。');
    if (mode === 'online') {
     if (online) { online.location.replace(RECEIVE_URL);online = null; }
     else { const link = document.createElement('a');link.href = RECEIVE_URL;link.target = '_blank';link.rel = 'noopener noreferrer';link.textContent = ' 打开在线阅读器';$('#st-nook-status').append(link); }
    }
-  } catch (error) { online?.close();if (!controller.signal.aborted) report(error.message); }
+  } catch (error) { rejectDelivery(error);online?.close();if (!controller.signal.aborted) report(error.message); }
   finally {
+   rejectDelivery(new DOMException('操作结束', 'AbortError'));
    busy = false;
    if (dialog.isConnected) { buttons.forEach(button => button.disabled = false);inputs.forEach((input, index) => input.disabled = disabled[index]); }
   }
@@ -211,13 +225,6 @@ async function openImporter() {
  $('#st-nook-copy').onclick = () => runExport('copy');
  $('#st-nook-open-reader').onclick = () => runExport('online');
  $('#st-nook-download').onclick = () => runExport('download');
-}
-
-async function copyText(text) {
- try { if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(text); return true; } } catch {}
- const input = document.createElement('textarea'); input.readOnly = true; input.inputMode = 'none'; input.value = text; input.style.cssText = 'position:fixed;left:0;top:0;width:1px;height:1px;opacity:0';
- document.querySelector('.st-nook-dialog').append(input); input.focus(); input.select();
- let copied = false; try { copied = document.execCommand('copy'); } catch {} input.remove(); return copied;
 }
 
 async function avatarData(avatar, signal) {
